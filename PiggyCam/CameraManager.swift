@@ -98,6 +98,9 @@ final class CameraManager: NSObject, ObservableObject {
         var boundingBox: CGRect
         var isExcluded: Bool
         var evaluatedFrame: Int
+        var lastMatchedFrame: Int?
+        var consecutiveMatches: Int
+        var consecutiveMisses: Int
     }
 
     private lazy var pigMask: CIImage? = {
@@ -159,6 +162,9 @@ final class CameraManager: NSObject, ObservableObject {
                 self.session.addInput(oldInput)
             }
             self.session.commitConfiguration()
+            self.outputQueue.async {
+                self.faceMatchStates.removeAll()
+            }
         }
     }
 
@@ -575,25 +581,51 @@ final class CameraManager: NSObject, ObservableObject {
             }).flatMap { faceDistance($0.boundingBox, box) < 0.2 ? $0 : nil }
             let shouldReevaluate = forceFaceMatching
                 || previous == nil
-                || faceMatchFrame - (previous?.evaluatedFrame ?? 0) >= 12
+                || faceMatchFrame - (previous?.evaluatedFrame ?? 0) >= 6
             let isExcluded: Bool
             let evaluatedFrame: Int
+            let lastMatchedFrame: Int?
+            let consecutiveMatches: Int
+            let consecutiveMisses: Int
             if shouldReevaluate {
-                let expandedFaceRect = faceRect
-                    .insetBy(dx: -faceRect.width * 0.08, dy: -faceRect.height * 0.08)
-                    .intersection(image.extent)
-                isExcluded = faceExclusionStore.shouldExclude(
-                    faceImage: image.cropped(to: expandedFaceRect)
-                )
+                let matched = faceExclusionStore.shouldExclude(faceIn: image, faceRect: faceRect)
                 evaluatedFrame = faceMatchFrame
+                if matched {
+                    consecutiveMatches = (previous?.consecutiveMatches ?? 0) + 1
+                    isExcluded = forceFaceMatching
+                        || previous?.isExcluded == true
+                        || consecutiveMatches >= 2
+                    lastMatchedFrame = faceMatchFrame
+                    consecutiveMisses = 0
+                } else if !forceFaceMatching,
+                          previous?.isExcluded == true,
+                          let previousMatchedFrame = previous?.lastMatchedFrame,
+                          faceMatchFrame - previousMatchedFrame <= 36,
+                          (previous?.consecutiveMisses ?? 0) < 3 {
+                    isExcluded = true
+                    lastMatchedFrame = previousMatchedFrame
+                    consecutiveMatches = previous?.consecutiveMatches ?? 0
+                    consecutiveMisses = (previous?.consecutiveMisses ?? 0) + 1
+                } else {
+                    isExcluded = false
+                    lastMatchedFrame = nil
+                    consecutiveMatches = 0
+                    consecutiveMisses = 0
+                }
             } else {
                 isExcluded = previous?.isExcluded ?? false
                 evaluatedFrame = previous?.evaluatedFrame ?? faceMatchFrame
+                lastMatchedFrame = previous?.lastMatchedFrame
+                consecutiveMatches = previous?.consecutiveMatches ?? 0
+                consecutiveMisses = previous?.consecutiveMisses ?? 0
             }
             updatedStates.append(FaceMatchState(
                 boundingBox: box,
                 isExcluded: isExcluded,
-                evaluatedFrame: evaluatedFrame
+                evaluatedFrame: evaluatedFrame,
+                lastMatchedFrame: lastMatchedFrame,
+                consecutiveMatches: consecutiveMatches,
+                consecutiveMisses: consecutiveMisses
             ))
             if isExcluded { continue }
 
