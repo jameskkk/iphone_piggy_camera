@@ -88,21 +88,26 @@ struct CameraSettingsView: View {
                 }
 
                 Section {
+                    Toggle("自動校準（建議）", isOn: $store.usesAutomaticTolerance)
+
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            Text("比對容許度")
+                            Text(store.usesAutomaticTolerance ? "目前容許度" : "手動容許度")
                             Spacer()
-                            Text(store.matchTolerance.formatted(.number.precision(.fractionLength(2))))
+                            Text(store.effectiveTolerance.formatted(.number.precision(.fractionLength(2))))
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
                         }
-                        Slider(value: $store.matchTolerance, in: 0.38...0.68, step: 0.01)
-                            .tint(.pink)
+
+                        if !store.usesAutomaticTolerance {
+                            Slider(value: $store.matchTolerance, in: 0.50...0.82, step: 0.01)
+                                .tint(.pink)
+                        }
                     }
                 } header: {
                     Text("辨識調整")
                 } footer: {
-                    Text("數值較低會減少誤排除，但可能漏掉角度差異較大的本人；數值較高則較寬鬆。建議先使用預設值。")
+                    Text("自動校準會根據已加入照片之間的差異調整容許度。若改用手動，數值較低會減少誤排除但較容易漏掉本人，數值較高則較寬鬆。")
                 }
 
                 Section("隱私") {
