@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var lastMagnification: CGFloat = 1
     @State private var showPhotoBrowser = false
     @State private var selectedLibraryItem: PhotosPickerItem?
+    @State private var showSettings = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -54,6 +55,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             camera.refreshPhotoLibraryThumbnail()
         }
+        .sheet(isPresented: $showSettings) {
+            CameraSettingsView(store: camera.faceExclusionStore)
+        }
     }
 
     private var topControls: some View {
@@ -71,7 +75,7 @@ struct ContentView: View {
                 .background(.black.opacity(0.48), in: Capsule())
             }
 
-            HStack(spacing: 24) {
+            HStack(spacing: 18) {
                 Button(action: camera.cycleFlashMode) {
                     Image(systemName: camera.flashMode.symbolName)
                         .foregroundStyle(camera.flashMode == .off ? .white : .yellow)
@@ -115,9 +119,17 @@ struct ContentView: View {
                         .foregroundStyle(camera.pigEffectEnabled ? .pink : .white)
                 }
                 .accessibilityLabel(camera.pigEffectEnabled ? "關閉小豬效果" : "開啟小豬效果")
+
+                Button {
+                    showSettings = true
+                } label: {
+                    Image(systemName: "gearshape.fill")
+                        .foregroundStyle(camera.faceExclusionStore.faces.isEmpty ? .white : .pink)
+                }
+                .accessibilityLabel("開啟設定")
             }
             .font(.system(size: 20, weight: .semibold))
-            .padding(.horizontal, 22)
+            .padding(.horizontal, 20)
             .padding(.vertical, 12)
             .background(.white.opacity(0.1), in: Capsule())
             .disabled(camera.isRecording)

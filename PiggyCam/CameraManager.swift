@@ -45,6 +45,8 @@ enum CameraFlashMode: CaseIterable {
 }
 
 final class CameraManager: NSObject, ObservableObject {
+    let faceExclusionStore = FaceExclusionStore()
+
     @Published private(set) var previewFrame: CGImage?
     @Published private(set) var lastThumbnail: UIImage?
     @Published private(set) var isReady = false
@@ -80,6 +82,8 @@ final class CameraManager: NSObject, ObservableObject {
     private var lastRenderedFrame: CGImage?
     private var zoomBaseFactor: CGFloat = 1
     private var isObservingPhotoLibrary = false
+    private var faceMatchFrame = 0
+    private var faceMatchStates: [FaceMatchState] = []
 
     private var wantsRecording = false
     private var assetWriter: AVAssetWriter?
@@ -89,6 +93,12 @@ final class CameraManager: NSObject, ObservableObject {
     private var recordingURL: URL?
     private var recordingStartTime: CMTime?
     private var lastDurationUpdate: TimeInterval = 0
+
+    private struct FaceMatchState {
+        var boundingBox: CGRect
+        var isExcluded: Bool
+        var evaluatedFrame: Int
+    }
 
     private lazy var pigMask: CIImage? = {
         guard let image = UIImage(named: "PigMask") else { return nil }
@@ -536,14 +546,23 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func renderPigFrame(from image: CIImage) -> CIImage {
-        guard pigEffectEnabled, let mask = pigMask else { return image }
+    private func renderPigFrame(from image: CIImage, forceFaceMatching: Bool = false) -> CIImage {
+        guard pigEffectEnabled, let mask = pigMask else {
+            faceMatchStates.removeAll()
+            return image
+        }
 
         let handler = VNImageRequestHandler(ciImage: image, orientation: .up)
         try? handler.perform([faceRequest])
-        guard let faces = faceRequest.results, !faces.isEmpty else { return image }
+        guard let faces = faceRequest.results, !faces.isEmpty else {
+            faceMatchStates.removeAll()
+            return image
+        }
 
-        return faces.reduce(image) { frame, face in
+        faceMatchFrame &+= 1
+        var updatedStates: [FaceMatchState] = []
+        var renderedImage = image
+        for face in faces {
             let box = face.boundingBox
             let faceRect = CGRect(
                 x: image.extent.minX + box.minX * image.extent.width,
@@ -551,6 +570,33 @@ final class CameraManager: NSObject, ObservableObject {
                 width: box.width * image.extent.width,
                 height: box.height * image.extent.height
             )
+            let previous = faceMatchStates.min(by: {
+                faceDistance($0.boundingBox, box) < faceDistance($1.boundingBox, box)
+            }).flatMap { faceDistance($0.boundingBox, box) < 0.2 ? $0 : nil }
+            let shouldReevaluate = forceFaceMatching
+                || previous == nil
+                || faceMatchFrame - (previous?.evaluatedFrame ?? 0) >= 12
+            let isExcluded: Bool
+            let evaluatedFrame: Int
+            if shouldReevaluate {
+                let expandedFaceRect = faceRect
+                    .insetBy(dx: -faceRect.width * 0.08, dy: -faceRect.height * 0.08)
+                    .intersection(image.extent)
+                isExcluded = faceExclusionStore.shouldExclude(
+                    faceImage: image.cropped(to: expandedFaceRect)
+                )
+                evaluatedFrame = faceMatchFrame
+            } else {
+                isExcluded = previous?.isExcluded ?? false
+                evaluatedFrame = previous?.evaluatedFrame ?? faceMatchFrame
+            }
+            updatedStates.append(FaceMatchState(
+                boundingBox: box,
+                isExcluded: isExcluded,
+                evaluatedFrame: evaluatedFrame
+            ))
+            if isExcluded { continue }
+
             let target = CGRect(
                 x: faceRect.midX - faceRect.width * 0.78,
                 y: faceRect.midY - faceRect.height * 0.83,
@@ -567,8 +613,16 @@ final class CameraManager: NSObject, ObservableObject {
                 tx: target.minX - mask.extent.minX * sx,
                 ty: target.minY - mask.extent.minY * sy
             )
-            return mask.transformed(by: transform).composited(over: frame)
+            renderedImage = mask.transformed(by: transform).composited(over: renderedImage)
         }
+        faceMatchStates = updatedStates
+        return renderedImage
+    }
+
+    private func faceDistance(_ first: CGRect, _ second: CGRect) -> CGFloat {
+        let dx = first.midX - second.midX
+        let dy = first.midY - second.midY
+        return sqrt(dx * dx + dy * dy)
     }
 
     private func updatePreview(with image: CIImage) {
@@ -783,7 +837,7 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
         }
         outputQueue.async { [weak self] in
             guard let self else { return }
-            let processed = self.renderPigFrame(from: source)
+            let processed = self.renderPigFrame(from: source, forceFaceMatching: true)
             guard let cgImage = self.ciContext.createCGImage(processed, from: processed.extent) else {
                 self.showMessage("照片處理失敗")
                 return
