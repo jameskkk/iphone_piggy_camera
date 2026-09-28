@@ -1,16 +1,69 @@
 import AVFoundation
 import Combine
 import CoreImage
+import ImageIO
 import Photos
 import UIKit
 import Vision
 
+enum CameraFlashMode: CaseIterable {
+    case off
+    case auto
+    case on
+
+    var title: String {
+        switch self {
+        case .off: "關閉"
+        case .auto: "自動"
+        case .on: "開啟"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .off: "bolt.slash.fill"
+        case .auto: "bolt.badge.automatic.fill"
+        case .on: "bolt.fill"
+        }
+    }
+
+    var avMode: AVCaptureDevice.FlashMode {
+        switch self {
+        case .off: .off
+        case .auto: .auto
+        case .on: .on
+        }
+    }
+
+    var next: CameraFlashMode {
+        switch self {
+        case .off: .auto
+        case .auto: .on
+        case .on: .off
+        }
+    }
+}
+
 final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var previewFrame: CGImage?
+    @Published private(set) var lastThumbnail: UIImage?
     @Published private(set) var isReady = false
     @Published private(set) var isRecording = false
+    @Published private(set) var isUsingFrontCamera = true
+    @Published private(set) var recordingDuration: TimeInterval = 0
     @Published private(set) var permissionProblem: String?
     @Published private(set) var message: String?
+    @Published private(set) var countdown: Int?
+    @Published private(set) var zoomFactor: CGFloat = 1
+    @Published private(set) var availableZoomFactors: [CGFloat] = [1, 2]
+    @Published private(set) var focusPoint: CGPoint?
+    @Published private(set) var exposureBias: Float = 0
+    @Published private(set) var minimumExposureBias: Float = -2
+    @Published private(set) var maximumExposureBias: Float = 2
+    @Published private(set) var flashMode: CameraFlashMode = .off
+    @Published private(set) var isFlashAvailable = false
+    @Published private(set) var pigEffectEnabled = true
+    @Published private(set) var shutterFlashVisible = false
 
     private let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "com.john.PiggyCam.session")
@@ -20,10 +73,12 @@ final class CameraManager: NSObject, ObservableObject {
 
     private var videoInput: AVCaptureDeviceInput?
     private var videoOutput: AVCaptureVideoDataOutput?
+    private var photoOutput: AVCapturePhotoOutput?
     private var audioOutput: AVCaptureAudioDataOutput?
     private var currentPosition: AVCaptureDevice.Position = .front
     private var configured = false
     private var lastRenderedFrame: CGImage?
+    private var zoomBaseFactor: CGFloat = 1
 
     private var wantsRecording = false
     private var assetWriter: AVAssetWriter?
@@ -32,6 +87,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var recordingURL: URL?
     private var recordingStartTime: CMTime?
+    private var lastDurationUpdate: TimeInterval = 0
 
     private lazy var pigMask: CIImage? = {
         guard let image = UIImage(named: "PigMask") else { return nil }
@@ -61,7 +117,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func switchCamera() {
-        guard !isRecording else { return }
+        guard !isRecording, countdown == nil else { return }
         sessionQueue.async { [weak self] in
             guard let self else { return }
             let next: AVCaptureDevice.Position = self.currentPosition == .front ? .back : .front
@@ -80,7 +136,8 @@ final class CameraManager: NSObject, ObservableObject {
                 self.session.addInput(newInput)
                 self.videoInput = newInput
                 self.currentPosition = next
-                self.updateVideoConnection()
+                self.updateConnections()
+                self.configureCapabilities(for: device)
             } else {
                 self.session.addInput(oldInput)
             }
@@ -88,25 +145,114 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    func takePhoto() {
-        guard let image = lastRenderedFrame else {
-            showMessage("相機尚未準備完成")
+    func cycleFlashMode() {
+        guard isFlashAvailable else {
+            showMessage("前置鏡頭不支援硬體閃光燈")
             return
         }
-        savePhoto(UIImage(cgImage: image))
+        flashMode = flashMode.next
+    }
+
+    func togglePigEffect() {
+        pigEffectEnabled.toggle()
+        showMessage(pigEffectEnabled ? "小豬效果已開啟" : "小豬效果已關閉")
+    }
+
+    func takePhoto(after delay: Int = 0) {
+        guard isReady, !isRecording, countdown == nil else { return }
+        if delay > 0 {
+            runCountdown(delay)
+        } else {
+            capturePhotoNow()
+        }
+    }
+
+    func setZoom(_ displayFactor: CGFloat) {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoInput?.device else { return }
+            let minimumDisplay = device.minAvailableVideoZoomFactor / self.zoomBaseFactor
+            let maximumDisplay = min(device.maxAvailableVideoZoomFactor / self.zoomBaseFactor, 8)
+            let clampedDisplay = min(max(displayFactor, minimumDisplay), maximumDisplay)
+            let deviceFactor = clampedDisplay * self.zoomBaseFactor
+            do {
+                try device.lockForConfiguration()
+                device.ramp(toVideoZoomFactor: deviceFactor, withRate: 12)
+                device.unlockForConfiguration()
+                DispatchQueue.main.async { self.zoomFactor = clampedDisplay }
+            } catch {
+                self.showMessage("無法調整縮放")
+            }
+        }
+    }
+
+    func focus(at normalizedPoint: CGPoint) {
+        let point = CGPoint(
+            x: min(max(normalizedPoint.x, 0), 1),
+            y: min(max(normalizedPoint.y, 0), 1)
+        )
+        DispatchQueue.main.async {
+            self.focusPoint = point
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                if self.focusPoint == point { self.focusPoint = nil }
+            }
+        }
+
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoInput?.device else { return }
+            let devicePoint = CGPoint(
+                x: point.y,
+                y: self.currentPosition == .front ? point.x : 1 - point.x
+            )
+            do {
+                try device.lockForConfiguration()
+                if device.isFocusPointOfInterestSupported,
+                   device.isFocusModeSupported(.autoFocus) {
+                    device.focusPointOfInterest = devicePoint
+                    device.focusMode = .autoFocus
+                }
+                if device.isExposurePointOfInterestSupported,
+                   device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposurePointOfInterest = devicePoint
+                    device.exposureMode = .continuousAutoExposure
+                }
+                device.unlockForConfiguration()
+            } catch {
+                self.showMessage("無法設定對焦")
+            }
+        }
+    }
+
+    func setExposureBias(_ value: Float) {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoInput?.device else { return }
+            let clamped = min(max(value, device.minExposureTargetBias), device.maxExposureTargetBias)
+            do {
+                try device.lockForConfiguration()
+                device.setExposureTargetBias(clamped)
+                device.unlockForConfiguration()
+                DispatchQueue.main.async { self.exposureBias = clamped }
+            } catch {
+                self.showMessage("無法調整曝光")
+            }
+        }
     }
 
     func startRecording() {
-        guard isReady, !isRecording else { return }
+        guard isReady, !isRecording, countdown == nil else { return }
         outputQueue.async { [weak self] in
             self?.resetWriter()
             self?.wantsRecording = true
         }
-        DispatchQueue.main.async { self.isRecording = true }
+        if flashMode == .on { setTorch(enabled: true) }
+        DispatchQueue.main.async {
+            self.recordingDuration = 0
+            self.isRecording = true
+        }
     }
 
     func stopRecording() {
         guard isRecording else { return }
+        setTorch(enabled: false)
         DispatchQueue.main.async { self.isRecording = false }
         outputQueue.async { [weak self] in
             guard let self else { return }
@@ -121,6 +267,9 @@ final class CameraManager: NSObject, ObservableObject {
             writer.finishWriting { [weak self] in
                 guard let self else { return }
                 if writer.status == .completed {
+                    if let frame = self.lastRenderedFrame {
+                        DispatchQueue.main.async { self.lastThumbnail = UIImage(cgImage: frame) }
+                    }
                     self.saveVideo(at: url)
                 } else {
                     try? FileManager.default.removeItem(at: url)
@@ -134,6 +283,38 @@ final class CameraManager: NSObject, ObservableObject {
     func openSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+    }
+
+    private func runCountdown(_ remaining: Int) {
+        DispatchQueue.main.async {
+            self.countdown = remaining
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                if remaining > 1 {
+                    self.runCountdown(remaining - 1)
+                } else {
+                    self.countdown = nil
+                    self.capturePhotoNow()
+                }
+            }
+        }
+    }
+
+    private func capturePhotoNow() {
+        sessionQueue.async { [weak self] in
+            guard let self, let output = self.photoOutput else { return }
+            let settings = AVCapturePhotoSettings()
+            settings.photoQualityPrioritization = .quality
+            if self.isFlashAvailable {
+                settings.flashMode = self.flashMode.avMode
+            }
+            DispatchQueue.main.async {
+                self.shutterFlashVisible = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                    self.shutterFlashVisible = false
+                }
+            }
+            output.capturePhoto(with: settings, delegate: self)
+        }
     }
 
     private func requestOptionalPermissionsAndConfigure() {
@@ -169,7 +350,7 @@ final class CameraManager: NSObject, ObservableObject {
     private func configureSession() -> Bool {
         session.beginConfiguration()
         defer { session.commitConfiguration() }
-        session.sessionPreset = .high
+        session.sessionPreset = .photo
 
         guard
             let camera = cameraDevice(position: currentPosition),
@@ -194,6 +375,12 @@ final class CameraManager: NSObject, ObservableObject {
         session.addOutput(video)
         videoOutput = video
 
+        let photo = AVCapturePhotoOutput()
+        guard session.canAddOutput(photo) else { return false }
+        session.addOutput(photo)
+        photo.maxPhotoQualityPrioritization = .quality
+        photoOutput = photo
+
         let audio = AVCaptureAudioDataOutput()
         audio.setSampleBufferDelegate(self, queue: outputQueue)
         if session.canAddOutput(audio) {
@@ -201,44 +388,113 @@ final class CameraManager: NSObject, ObservableObject {
             audioOutput = audio
         }
 
-        updateVideoConnection()
+        updateConnections()
+        configureCapabilities(for: camera)
         return true
     }
 
-    private func updateVideoConnection() {
-        guard let connection = videoOutput?.connection(with: .video) else { return }
-        if connection.isVideoRotationAngleSupported(90) {
-            connection.videoRotationAngle = 90
+    private func updateConnections() {
+        [videoOutput?.connection(with: .video), photoOutput?.connection(with: .video)]
+            .compactMap { $0 }
+            .forEach { connection in
+                if connection.isVideoRotationAngleSupported(90) {
+                    connection.videoRotationAngle = 90
+                }
+                connection.automaticallyAdjustsVideoMirroring = false
+                if connection.isVideoMirroringSupported {
+                    connection.isVideoMirrored = currentPosition == .front
+                }
+            }
+    }
+
+    private func configureCapabilities(for device: AVCaptureDevice) {
+        let supportsUltraWide = device.deviceType == .builtInTripleCamera
+            || device.deviceType == .builtInDualWideCamera
+        if supportsUltraWide,
+           let firstSwitch = device.virtualDeviceSwitchOverVideoZoomFactors.first {
+            zoomBaseFactor = CGFloat(truncating: firstSwitch)
+        } else {
+            zoomBaseFactor = 1
         }
-        connection.automaticallyAdjustsVideoMirroring = false
-        if connection.isVideoMirroringSupported {
-            connection.isVideoMirrored = currentPosition == .front
+
+        let candidates: [CGFloat] = supportsUltraWide ? [0.5, 1, 2] : [1, 2]
+        let supported = candidates.filter {
+            let hardwareFactor = $0 * zoomBaseFactor
+            return hardwareFactor >= device.minAvailableVideoZoomFactor
+                && hardwareFactor <= device.maxAvailableVideoZoomFactor
+        }
+        let defaultDisplayFactor: CGFloat = supported.contains(1) ? 1 : (supported.first ?? 1)
+        let defaultHardwareFactor = min(
+            max(defaultDisplayFactor * zoomBaseFactor, device.minAvailableVideoZoomFactor),
+            device.maxAvailableVideoZoomFactor
+        )
+        do {
+            try device.lockForConfiguration()
+            device.videoZoomFactor = defaultHardwareFactor
+            device.unlockForConfiguration()
+        } catch { }
+
+        DispatchQueue.main.async {
+            self.availableZoomFactors = supported.isEmpty ? [1] : supported
+            self.zoomFactor = defaultDisplayFactor
+            self.isUsingFrontCamera = self.currentPosition == .front
+            self.isFlashAvailable = self.currentPosition == .back && device.hasFlash
+            self.flashMode = self.isFlashAvailable ? self.flashMode : .off
+            self.minimumExposureBias = max(device.minExposureTargetBias, -2)
+            self.maximumExposureBias = min(device.maxExposureTargetBias, 2)
+            self.exposureBias = 0
         }
     }
 
     private func cameraDevice(position: AVCaptureDevice.Position) -> AVCaptureDevice? {
-        AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.builtInWideAngleCamera],
-            mediaType: .video,
-            position: position
-        ).devices.first
+        let deviceTypes: [AVCaptureDevice.DeviceType]
+        if position == .back {
+            deviceTypes = [
+                .builtInTripleCamera,
+                .builtInDualWideCamera,
+                .builtInDualCamera,
+                .builtInWideAngleCamera
+            ]
+        } else {
+            deviceTypes = [.builtInTrueDepthCamera, .builtInWideAngleCamera]
+        }
+        for type in deviceTypes {
+            if let device = AVCaptureDevice.default(type, for: .video, position: position) {
+                return device
+            }
+        }
+        return nil
     }
 
-    private func renderPigFrame(from pixelBuffer: CVPixelBuffer) -> CIImage {
-        let base = CIImage(cvPixelBuffer: pixelBuffer)
-        guard let mask = pigMask else { return base }
+    private func setTorch(enabled: Bool) {
+        sessionQueue.async { [weak self] in
+            guard let device = self?.videoInput?.device, device.hasTorch else { return }
+            do {
+                try device.lockForConfiguration()
+                if enabled {
+                    try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+                } else {
+                    device.torchMode = .off
+                }
+                device.unlockForConfiguration()
+            } catch { }
+        }
+    }
 
-        let handler = VNImageRequestHandler(ciImage: base, orientation: .up)
+    private func renderPigFrame(from image: CIImage) -> CIImage {
+        guard pigEffectEnabled, let mask = pigMask else { return image }
+
+        let handler = VNImageRequestHandler(ciImage: image, orientation: .up)
         try? handler.perform([faceRequest])
-        guard let faces = faceRequest.results, !faces.isEmpty else { return base }
+        guard let faces = faceRequest.results, !faces.isEmpty else { return image }
 
-        return faces.reduce(base) { image, face in
+        return faces.reduce(image) { frame, face in
             let box = face.boundingBox
             let faceRect = CGRect(
-                x: base.extent.minX + box.minX * base.extent.width,
-                y: base.extent.minY + box.minY * base.extent.height,
-                width: box.width * base.extent.width,
-                height: box.height * base.extent.height
+                x: image.extent.minX + box.minX * image.extent.width,
+                y: image.extent.minY + box.minY * image.extent.height,
+                width: box.width * image.extent.width,
+                height: box.height * image.extent.height
             )
             let target = CGRect(
                 x: faceRect.midX - faceRect.width * 0.78,
@@ -256,7 +512,7 @@ final class CameraManager: NSObject, ObservableObject {
                 tx: target.minX - mask.extent.minX * sx,
                 ty: target.minY - mask.extent.minY * sy
             )
-            return mask.transformed(by: transform).composited(over: image)
+            return mask.transformed(by: transform).composited(over: frame)
         }
     }
 
@@ -294,6 +550,14 @@ final class CameraManager: NSObject, ObservableObject {
             colorSpace: CGColorSpaceCreateDeviceRGB()
         )
         adaptor.append(buffer, withPresentationTime: presentationTime)
+
+        if let start = recordingStartTime {
+            let duration = max(CMTimeGetSeconds(presentationTime - start), 0)
+            if duration - lastDurationUpdate >= 0.2 {
+                lastDurationUpdate = duration
+                DispatchQueue.main.async { self.recordingDuration = duration }
+            }
+        }
     }
 
     private func appendAudio(_ sampleBuffer: CMSampleBuffer) {
@@ -357,9 +621,11 @@ final class CameraManager: NSObject, ObservableObject {
         pixelBufferAdaptor = nil
         recordingURL = nil
         recordingStartTime = nil
+        lastDurationUpdate = 0
     }
 
     private func savePhoto(_ image: UIImage) {
+        DispatchQueue.main.async { self.lastThumbnail = image }
         ensurePhotoAccess { [weak self] allowed in
             guard let self else { return }
             guard allowed else {
@@ -432,10 +698,34 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
             return
         }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let processed = renderPigFrame(from: pixelBuffer)
+        let processed = renderPigFrame(from: CIImage(cvPixelBuffer: pixelBuffer))
         updatePreview(with: processed)
         if wantsRecording {
             appendVideo(processed, presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        }
+    }
+}
+
+extension CameraManager: AVCapturePhotoCaptureDelegate {
+    func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        didFinishProcessingPhoto photo: AVCapturePhoto,
+        error: Error?
+    ) {
+        guard error == nil,
+              let data = photo.fileDataRepresentation(),
+              let source = CIImage(data: data, options: [.applyOrientationProperty: true]) else {
+            showMessage("照片拍攝失敗")
+            return
+        }
+        outputQueue.async { [weak self] in
+            guard let self else { return }
+            let processed = self.renderPigFrame(from: source)
+            guard let cgImage = self.ciContext.createCGImage(processed, from: processed.extent) else {
+                self.showMessage("照片處理失敗")
+                return
+            }
+            self.savePhoto(UIImage(cgImage: cgImage))
         }
     }
 }
