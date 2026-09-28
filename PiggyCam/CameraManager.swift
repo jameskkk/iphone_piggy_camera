@@ -469,12 +469,11 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func updateConnections() {
-        let previewAngle = rotationCoordinator?.videoRotationAngleForHorizonLevelPreview ?? 90
-        let captureAngle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? previewAngle
+        let captureAngle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
 
         applyConnectionSettings(
             to: videoOutput?.connection(with: .video),
-            rotationAngle: previewAngle
+            rotationAngle: captureAngle
         )
         applyConnectionSettings(
             to: photoOutput?.connection(with: .video),
@@ -487,7 +486,7 @@ final class CameraManager: NSObject, ObservableObject {
         let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
         rotationCoordinator = coordinator
         rotationObservation = coordinator.observe(
-            \.videoRotationAngleForHorizonLevelPreview,
+            \.videoRotationAngleForHorizonLevelCapture,
             options: [.initial, .new]
         ) { [weak self] _, _ in
             self?.sessionQueue.async { [weak self] in
