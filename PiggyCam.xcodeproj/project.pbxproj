@@ -257,6 +257,7 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "PiggyCam 需要相機來辨識人臉並套用小豬效果。";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "PiggyCam 需要麥克風來錄製有聲影片。";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "PiggyCam 需要將拍攝的照片與影片儲存到照片圖庫。";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "PiggyCam 需要讀取照片圖庫，以顯示最近拍攝縮圖並開啟照片瀏覽器。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -290,6 +291,7 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "PiggyCam 需要相機來辨識人臉並套用小豬效果。";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "PiggyCam 需要麥克風來錄製有聲影片。";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "PiggyCam 需要將拍攝的照片與影片儲存到照片圖庫。";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "PiggyCam 需要讀取照片圖庫，以顯示最近拍攝縮圖並開啟照片瀏覽器。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

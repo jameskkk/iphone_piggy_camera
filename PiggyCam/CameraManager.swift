@@ -79,6 +79,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var configured = false
     private var lastRenderedFrame: CGImage?
     private var zoomBaseFactor: CGFloat = 1
+    private var isObservingPhotoLibrary = false
 
     private var wantsRecording = false
     private var assetWriter: AVAssetWriter?
@@ -93,6 +94,12 @@ final class CameraManager: NSObject, ObservableObject {
         guard let image = UIImage(named: "PigMask") else { return nil }
         return CIImage(image: image)
     }()
+
+    deinit {
+        if isObservingPhotoLibrary {
+            PHPhotoLibrary.shared().unregisterChangeObserver(self)
+        }
+    }
 
     func start() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -285,6 +292,34 @@ final class CameraManager: NSObject, ObservableObject {
         UIApplication.shared.open(url)
     }
 
+    func refreshPhotoLibraryThumbnail() {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return }
+
+        let fetchOptions = PHFetchOptions()
+        fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        fetchOptions.fetchLimit = 1
+        guard let latestAsset = PHAsset.fetchAssets(with: fetchOptions).firstObject else { return }
+
+        let imageOptions = PHImageRequestOptions()
+        imageOptions.deliveryMode = .opportunistic
+        imageOptions.resizeMode = .fast
+        imageOptions.isNetworkAccessAllowed = true
+        PHImageManager.default().requestImage(
+            for: latestAsset,
+            targetSize: CGSize(width: 240, height: 240),
+            contentMode: .aspectFill,
+            options: imageOptions
+        ) { [weak self] image, _ in
+            guard let image else { return }
+            DispatchQueue.main.async { self?.lastThumbnail = image }
+        }
+    }
+
+    func useBrowserThumbnail(_ image: UIImage) {
+        lastThumbnail = image
+    }
+
     private func runCountdown(_ remaining: Int) {
         DispatchQueue.main.async {
             self.countdown = remaining
@@ -318,13 +353,33 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private func requestOptionalPermissionsAndConfigure() {
-        PHPhotoLibrary.requestAuthorization(for: .addOnly) { _ in }
+        requestPhotoLibraryAccess()
         if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
                 self?.configureAndStartSession()
             }
         } else {
             configureAndStartSession()
+        }
+    }
+
+    private func requestPhotoLibraryAccess() {
+        let handleStatus: (PHAuthorizationStatus) -> Void = { [weak self] status in
+            guard let self, status == .authorized || status == .limited else { return }
+            DispatchQueue.main.async {
+                if !self.isObservingPhotoLibrary {
+                    PHPhotoLibrary.shared().register(self)
+                    self.isObservingPhotoLibrary = true
+                }
+                self.refreshPhotoLibraryThumbnail()
+            }
+        }
+
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if status == .notDetermined {
+            PHPhotoLibrary.requestAuthorization(for: .readWrite, handler: handleStatus)
+        } else {
+            handleStatus(status)
         }
     }
 
@@ -636,6 +691,7 @@ final class CameraManager: NSObject, ObservableObject {
                 PHAssetChangeRequest.creationRequestForAsset(from: image)
             } completionHandler: { success, _ in
                 self.showMessage(success ? "照片已儲存" : "照片儲存失敗")
+                if success { self.refreshPhotoLibraryThumbnail() }
             }
         }
     }
@@ -653,6 +709,7 @@ final class CameraManager: NSObject, ObservableObject {
             } completionHandler: { success, _ in
                 try? FileManager.default.removeItem(at: url)
                 self.showMessage(success ? "影片已儲存" : "影片儲存失敗")
+                if success { self.refreshPhotoLibraryThumbnail() }
             }
         }
     }
@@ -703,6 +760,12 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCapture
         if wantsRecording {
             appendVideo(processed, presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         }
+    }
+}
+
+extension CameraManager: PHPhotoLibraryChangeObserver {
+    func photoLibraryDidChange(_ changeInstance: PHChange) {
+        refreshPhotoLibraryThumbnail()
     }
 }
 
