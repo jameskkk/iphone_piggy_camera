@@ -16,21 +16,13 @@ struct ContentView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let topHeight = min(max(proxy.size.height * 0.13, 72), 118)
-            let previewHeight = min(proxy.size.width * 4 / 3, proxy.size.height - topHeight - 188)
-
             ZStack {
                 Color.black.ignoresSafeArea()
 
-                VStack(spacing: 0) {
-                    topControls
-                        .frame(height: topHeight, alignment: .bottom)
-
-                    cameraPreview
-                        .frame(width: proxy.size.width, height: previewHeight)
-
-                    bottomControls
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if proxy.size.width > proxy.size.height {
+                    landscapeCameraLayout(size: proxy.size)
+                } else {
+                    portraitCameraLayout(size: proxy.size)
                 }
 
                 if !camera.isReady {
@@ -58,6 +50,61 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) {
             CameraSettingsView(store: camera.faceExclusionStore)
         }
+    }
+
+    private func portraitCameraLayout(size: CGSize) -> some View {
+        let topHeight = min(max(size.height * 0.13, 72), 118)
+        let previewHeight = min(size.width * 4 / 3, size.height - topHeight - 188)
+
+        return VStack(spacing: 0) {
+            topControls
+                .frame(height: topHeight, alignment: .bottom)
+
+            cameraPreview
+                .frame(width: size.width, height: previewHeight)
+
+            bottomControls
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func landscapeCameraLayout(size: CGSize) -> some View {
+        ZStack {
+            cameraPreview
+                .frame(width: size.width, height: size.height)
+
+            VStack(spacing: 0) {
+                LinearGradient(
+                    colors: [.black.opacity(0.82), .black.opacity(0.36), .clear],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: min(size.height * 0.25, 150))
+
+                Spacer()
+
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.42), .black.opacity(0.9)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: min(size.height * 0.38, 220))
+            }
+            .allowsHitTesting(false)
+
+            VStack(spacing: 0) {
+                topControls
+                    .frame(height: min(max(size.height * 0.19, 88), 124), alignment: .bottom)
+
+                Spacer(minLength: 8)
+
+                bottomControls
+                    .frame(maxWidth: min(size.width, 960))
+            }
+            .padding(.horizontal, max(16, size.width * 0.04))
+            .padding(.bottom, 6)
+        }
+        .clipped()
     }
 
     private var topControls: some View {
