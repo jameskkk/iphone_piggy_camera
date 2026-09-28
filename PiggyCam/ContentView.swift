@@ -1,5 +1,7 @@
+import PhotosUI
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var camera = CameraManager()
@@ -8,7 +10,8 @@ struct ContentView: View {
     @State private var gridEnabled = false
     @State private var exposureExpanded = false
     @State private var lastMagnification: CGFloat = 1
-    @State private var showCaptureInfo = false
+    @State private var showPhotoBrowser = false
+    @State private var selectedLibraryItem: PhotosPickerItem?
 
     var body: some View {
         GeometryReader { proxy in
@@ -39,10 +42,17 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.15), value: camera.shutterFlashVisible)
         .task { camera.start() }
         .onDisappear { camera.stop() }
-        .alert("最近的拍攝內容", isPresented: $showCaptureInfo) {
-            Button("好", role: .cancel) { }
-        } message: {
-            Text("照片或影片已儲存到 iPhone 的「照片」App。")
+        .photosPicker(
+            isPresented: $showPhotoBrowser,
+            selection: $selectedLibraryItem,
+            matching: .any(of: [.images, .videos]),
+            preferredItemEncoding: .automatic
+        )
+        .onChange(of: selectedLibraryItem) { _, item in
+            updateThumbnail(from: item)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            camera.refreshPhotoLibraryThumbnail()
         }
     }
 
@@ -269,7 +279,7 @@ struct ContentView: View {
         VStack(spacing: 16) {
             HStack {
                 Button {
-                    if camera.lastThumbnail != nil { showCaptureInfo = true }
+                    showPhotoBrowser = true
                 } label: {
                     Group {
                         if let thumbnail = camera.lastThumbnail {
@@ -287,7 +297,8 @@ struct ContentView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("最近拍攝")
+                .disabled(camera.isRecording)
+                .accessibilityLabel("瀏覽照片與影片")
 
                 Spacer()
 
@@ -421,6 +432,22 @@ struct ContentView: View {
     private func switchCamera() {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         camera.switchCamera()
+    }
+
+    private func updateThumbnail(from item: PhotosPickerItem?) {
+        guard let item else {
+            camera.refreshPhotoLibraryThumbnail()
+            return
+        }
+        guard item.supportedContentTypes.contains(where: { $0.conforms(to: .image) }) else {
+            camera.refreshPhotoLibraryThumbnail()
+            return
+        }
+        Task {
+            guard let data = try? await item.loadTransferable(type: Data.self),
+                  let image = UIImage(data: data) else { return }
+            await MainActor.run { camera.useBrowserThumbnail(image) }
+        }
     }
 }
 
